@@ -1,10 +1,11 @@
 use tauri::{AppHandle, Manager, Position, Size};
+
+#[cfg(target_os = "macos")]
 use tauri_nspanel::{
     CollectionBehavior, ManagerExt, PanelLevel, StyleMask, WebviewWindowExt, tauri_panel,
 };
 
-/// Macro to get existing panel or initialize it if needed.
-/// Returns Option<Panel> - Some if panel is available, None on error.
+#[cfg(target_os = "macos")]
 macro_rules! get_or_init_panel {
     ($app_handle:expr) => {
         match $app_handle.get_webview_panel("main") {
@@ -27,33 +28,123 @@ macro_rules! get_or_init_panel {
     };
 }
 
-// Export macro for use in other modules
-pub(crate) use get_or_init_panel;
+fn with_main_window<F>(app_handle: &AppHandle, f: F)
+where
+    F: FnOnce(tauri::WebviewWindow),
+{
+    match app_handle.get_webview_window("main") {
+        Some(window) => f(window),
+        None => log::error!("Main window not found"),
+    }
+}
 
-/// Show the panel (initializing if needed).
 pub fn show_panel(app_handle: &AppHandle) {
-    if let Some(panel) = get_or_init_panel!(app_handle) {
-        panel.show_and_make_key();
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(panel) = get_or_init_panel!(app_handle) {
+            panel.show_and_make_key();
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        with_main_window(app_handle, |window| {
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_focus();
+        });
     }
 }
 
-/// Toggle panel visibility. If visible, hide it. If hidden, show it.
-/// Used by global shortcut handler.
+pub fn hide_panel(app_handle: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        use tauri_nspanel::ManagerExt;
+
+        if let Ok(panel) = app_handle.get_webview_panel("main") {
+            panel.hide();
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        with_main_window(app_handle, |window| {
+            let _ = window.hide();
+        });
+    }
+}
+
 pub fn toggle_panel(app_handle: &AppHandle) {
-    let Some(panel) = get_or_init_panel!(app_handle) else {
-        return;
-    };
+    #[cfg(target_os = "macos")]
+    {
+        let Some(panel) = get_or_init_panel!(app_handle) else {
+            return;
+        };
 
-    if panel.is_visible() {
-        log::debug!("toggle_panel: hiding panel");
-        panel.hide();
-    } else {
-        log::debug!("toggle_panel: showing panel");
-        panel.show_and_make_key();
+        if panel.is_visible() {
+            log::debug!("toggle_panel: hiding panel");
+            panel.hide();
+        } else {
+            log::debug!("toggle_panel: showing panel");
+            panel.show_and_make_key();
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        with_main_window(app_handle, |window| {
+            let is_visible = window.is_visible().unwrap_or(false);
+            if is_visible {
+                log::debug!("toggle_panel: hiding window");
+                let _ = window.hide();
+            } else {
+                log::debug!("toggle_panel: showing window");
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        });
     }
 }
 
-// Define our panel class and event handler together
+pub fn handle_tray_click(app_handle: &AppHandle, icon_position: Position, icon_size: Size) {
+    #[cfg(target_os = "macos")]
+    {
+        let Some(panel) = get_or_init_panel!(app_handle) else {
+            return;
+        };
+
+        if panel.is_visible() {
+            log::debug!("tray click: hiding panel");
+            panel.hide();
+            return;
+        }
+
+        log::debug!("tray click: showing panel");
+        panel.show_and_make_key();
+        position_panel_at_tray_icon(app_handle, icon_position, icon_size);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (icon_position, icon_size);
+        with_main_window(app_handle, |window| {
+            let is_visible = window.is_visible().unwrap_or(false);
+            if is_visible {
+                log::debug!("tray click: hiding window");
+                let _ = window.hide();
+            } else {
+                log::debug!("tray click: showing window");
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.center();
+                let _ = window.set_focus();
+            }
+        });
+    }
+}
+
+#[cfg(target_os = "macos")]
 tauri_panel! {
     panel!(OpenUsagePanel {
         config: {
@@ -68,46 +159,49 @@ tauri_panel! {
 }
 
 pub fn init(app_handle: &tauri::AppHandle) -> tauri::Result<()> {
-    if app_handle.get_webview_panel("main").is_ok() {
-        return Ok(());
+    #[cfg(target_os = "macos")]
+    {
+        if app_handle.get_webview_panel("main").is_ok() {
+            return Ok(());
+        }
+
+        let window = app_handle.get_webview_window("main").unwrap();
+
+        let panel = window.to_panel::<OpenUsagePanel>()?;
+
+        // Disable native shadow - it causes gray border on transparent windows
+        // Let CSS handle shadow via shadow-xl class
+        panel.set_has_shadow(false);
+        panel.set_opaque(false);
+
+        panel.set_level(PanelLevel::MainMenu.value() + 1);
+        panel.set_collection_behavior(
+            CollectionBehavior::new()
+                .move_to_active_space()
+                .full_screen_auxiliary()
+                .value(),
+        );
+        panel.set_style_mask(StyleMask::empty().nonactivating_panel().value());
+
+        let event_handler = OpenUsagePanelEventHandler::new();
+        let handle = app_handle.clone();
+        event_handler.window_did_resign_key(move |_notification| {
+            if let Ok(panel) = handle.get_webview_panel("main") {
+                panel.hide();
+            }
+        });
+        panel.set_event_handler(Some(event_handler.as_ref()));
     }
 
-    let window = app_handle.get_webview_window("main").unwrap();
-
-    let panel = window.to_panel::<OpenUsagePanel>()?;
-
-    // Disable native shadow - it causes gray border on transparent windows
-    // Let CSS handle shadow via shadow-xl class
-    panel.set_has_shadow(false);
-    panel.set_opaque(false);
-
-    // Configure panel behavior
-    panel.set_level(PanelLevel::MainMenu.value() + 1);
-
-    panel.set_collection_behavior(
-        CollectionBehavior::new()
-            .move_to_active_space()
-            .full_screen_auxiliary()
-            .value(),
-    );
-
-    panel.set_style_mask(StyleMask::empty().nonactivating_panel().value());
-
-    // Set up event handler to hide panel when it loses focus
-    let event_handler = OpenUsagePanelEventHandler::new();
-
-    let handle = app_handle.clone();
-    event_handler.window_did_resign_key(move |_notification| {
-        if let Ok(panel) = handle.get_webview_panel("main") {
-            panel.hide();
-        }
-    });
-
-    panel.set_event_handler(Some(event_handler.as_ref()));
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app_handle.get_webview_window("main");
+    }
 
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 pub fn position_panel_at_tray_icon(
     app_handle: &tauri::AppHandle,
     icon_position: Position,
@@ -135,12 +229,7 @@ pub fn position_panel_at_tray_icon(
         Size::Logical(s) => (s.width, s.height),
     };
 
-    // Get the cursor's logical position via NSEvent — this is in macOS's flipped
-    // coordinate system (origin at bottom-left of primary screen).
     let mouse_logical = objc2_app_kit::NSEvent::mouseLocation();
-
-    // Convert from macOS bottom-left origin to top-left origin used by Tauri.
-    // Primary screen height (in points) defines the flip axis.
     let monitors = window.available_monitors().expect("failed to get monitors");
     let primary_logical_h = window
         .primary_monitor()
@@ -152,7 +241,6 @@ pub fn position_panel_at_tray_icon(
     let mouse_x = mouse_logical.x;
     let mouse_y = primary_logical_h - mouse_logical.y;
 
-    // Find the monitor containing the cursor in logical space (no ambiguity).
     let mut found_monitor = None;
     for m in &monitors {
         let pos = m.position();
@@ -189,9 +277,6 @@ pub fn position_panel_at_tray_icon(
     let target_scale = monitor.scale_factor();
     let mon_logical_x = monitor.position().x as f64;
     let mon_logical_y = monitor.position().y as f64;
-
-    // Convert tray icon physical coords to logical within the identified monitor.
-    // Physical origin of this monitor in the hybrid tray coordinate space:
     let phys_origin_x = mon_logical_x * target_scale;
     let phys_origin_y = mon_logical_y * target_scale;
 
@@ -200,10 +285,6 @@ pub fn position_panel_at_tray_icon(
     let icon_logical_w = icon_phys_w / target_scale;
     let icon_logical_h = icon_phys_h / target_scale;
 
-    // Read panel width from the window, converted to logical points.
-    // outer_size() returns physical pixels at the window's current scale factor.
-    // If the window isn't available yet, parse the configured width from tauri.conf.json
-    // (embedded at compile time) so it stays in sync automatically.
     let panel_width = match (window.outer_size(), window.scale_factor()) {
         (Ok(s), Ok(win_scale)) => s.width as f64 / win_scale,
         _ => {
