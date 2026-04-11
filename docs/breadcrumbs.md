@@ -6,3 +6,4 @@
 - Added a separate `package-desktop.yml` workflow for manual Windows/Ubuntu packaging attempts that upload artifacts without cutting a GitHub release.
 - First `Package Desktop` run failed because `bun run tauri build -- --bundles ...` forwarded `--bundles` to Cargo instead of Tauri; changed it to `bun run tauri build --bundles ...`.
 - Second `Package Desktop` run reached Rust compilation on Windows and Ubuntu, then failed because `get_log_path` used `app_handle.path()` without importing the `tauri::Manager` trait at module scope.
+- Third `Package Desktop` run generated Windows and Ubuntu bundles, then failed because updater artifact signing needs `TAURI_SIGNING_PRIVATE_KEY`; disabled `bundle.createUpdaterArtifacts` only for the manual package workflow.
